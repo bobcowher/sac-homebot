@@ -101,47 +101,58 @@ class Agent:
         obs = torch.from_numpy(obs).permute(2, 0, 1)
         return obs
 
-    def train_actor_critic(self, batch_size):
-        if not self.memory.can_sample(batch_size):
-            return None
+    def train_actor_critic(self, batch_size, epochs):
 
-        state_batch, action_batch, reward_batch, next_state_batch, mask_batch = \
-            self.memory.sample_nstep(batch_size, self.n_step, self.gamma)
+        total_qf1_loss   = 0.0
+        total_qf2_loss   = 0.0
+        total_actor_loss = 0.0
+        total_alpha_loss = 0.0
 
-        state_batch      = (state_batch.float()      / 255.0).to(self.device)
-        next_state_batch = (next_state_batch.float() / 255.0).to(self.device)
-        action_batch     = action_batch.float().to(self.device)
-        reward_batch     = reward_batch.float().to(self.device).unsqueeze(1)
-        mask_batch       = mask_batch.float().to(self.device).unsqueeze(1)
+        for _ in range(epochs):
+            state_batch, action_batch, reward_batch, next_state_batch, mask_batch = \
+                self.memory.sample_nstep(batch_size, self.n_step, self.gamma)
 
-        with torch.no_grad():
-            next_state_action, next_state_log_pi, _ = self.actor.sample(next_state_batch)
-            qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
-            min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
-            next_q_value = reward_batch + (1.0 - mask_batch) * (self.gamma ** self.n_step) * min_qf_next_target
+            state_batch      = (state_batch.float()      / 255.0).to(self.device)
+            next_state_batch = (next_state_batch.float() / 255.0).to(self.device)
+            action_batch     = action_batch.float().to(self.device)
+            reward_batch     = reward_batch.float().to(self.device).unsqueeze(1)
+            mask_batch       = mask_batch.float().to(self.device).unsqueeze(1)
 
-        qf1, qf2 = self.critic(state_batch, action_batch)
-        qf1_loss = F.mse_loss(qf1, next_q_value)
-        qf2_loss = F.mse_loss(qf2, next_q_value)
-        qf_loss = qf1_loss + qf2_loss
+            with torch.no_grad():
+                next_state_action, next_state_log_pi, _ = self.actor.sample(next_state_batch)
+                qf1_next_target, qf2_next_target = self.critic_target(next_state_batch, next_state_action)
+                min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
+                next_q_value = reward_batch + (1.0 - mask_batch) * (self.gamma ** self.n_step) * min_qf_next_target
 
-        self.critic_optim.zero_grad()
-        qf_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
-        self.critic_optim.step()
+            qf1, qf2 = self.critic(state_batch, action_batch)
+            qf1_loss = F.mse_loss(qf1, next_q_value)
+            qf2_loss = F.mse_loss(qf2, next_q_value)
+            qf_loss  = qf1_loss + qf2_loss
 
-        pi, log_pi, _ = self.actor.sample(state_batch)
-        qf1_pi, qf2_pi = self.critic(state_batch, pi)
-        min_qf_pi = torch.min(qf1_pi, qf2_pi)
+            self.critic_optim.zero_grad()
+            qf_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
+            self.critic_optim.step()
 
-        actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
+            pi, log_pi, _ = self.actor.sample(state_batch)
+            qf1_pi, qf2_pi = self.critic(state_batch, pi)
+            min_qf_pi = torch.min(qf1_pi, qf2_pi)
 
-        self.actor_optim.zero_grad()
-        actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
-        self.actor_optim.step()
+            actor_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
-        return qf1_loss.item(), qf2_loss.item(), actor_loss.item()
+            self.actor_optim.zero_grad()
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+            self.actor_optim.step()
+
+            alpha_loss = torch.tensor(0.).to(self.device)
+
+            total_qf1_loss   += qf1_loss.item()
+            total_qf2_loss   += qf2_loss.item()
+            total_actor_loss += actor_loss.item()
+            total_alpha_loss += alpha_loss.item()
+
+        return total_qf1_loss / epochs, total_qf2_loss / epochs, total_actor_loss / epochs, total_alpha_loss / epochs
 
     def save(self):
         self.actor.save_the_model("actor", verbose=True)
@@ -206,7 +217,7 @@ class Agent:
         throttle_brake = np.random.uniform(0.0, 1.0)
         return np.array([steering, throttle_brake], dtype=np.float32)
 
-    def train(self, episodes=1, batch_size=32, warmup_episodes=5, run_tag=None):
+    def train(self, episodes=1, offline_training_epochs=1, batch_size=32, warmup_episodes=5, run_tag=None):
 
         if run_tag is None:
             try:
@@ -236,11 +247,7 @@ class Agent:
 
             done = False
             episode_reward = 0.0
-            episode_steps = 0
-            total_qf1_loss  = 0.0
-            total_qf2_loss  = 0.0
-            total_actor_loss = 0.0
-            ac_updates = 0
+            episode_steps  = 0
 
             while not done:
                 if episode < warmup_episodes:
@@ -258,19 +265,10 @@ class Agent:
 
                 self.memory.store_transition(obs, actor_action, reward, next_obs, term, episode_done)
 
-                episode_reward += float(reward)
-                episode_steps  += 1
+                episode_reward   += float(reward)
+                episode_steps    += 1
+                self.total_steps += 1
                 obs = next_obs
-
-                # One AC update per env step after warmup
-                if episode >= warmup_episodes:
-                    result = self.train_actor_critic(batch_size)
-                    if result is not None:
-                        qf1_loss, qf2_loss, actor_loss = result
-                        total_qf1_loss  += qf1_loss
-                        total_qf2_loss  += qf2_loss
-                        total_actor_loss += actor_loss
-                        ac_updates += 1
 
             print(f"Episode {episode} | reward: {episode_reward:.1f} | steps: {episode_steps}")
 
@@ -278,20 +276,35 @@ class Agent:
                 best_score = episode_reward
                 self.save_best(best_score, episode)
 
+            total_qf1_loss   = 0.0
+            total_qf2_loss   = 0.0
+            total_actor_loss = 0.0
+            total_alpha_loss = 0.0
+            ac_updates = 0
+
+            if episode >= warmup_episodes and self.memory.can_sample(batch_size):
+                qf1_loss, qf2_loss, actor_loss, alpha_loss = self.train_actor_critic(batch_size, epochs=offline_training_epochs)
+                total_qf1_loss   += qf1_loss
+                total_qf2_loss   += qf2_loss
+                total_actor_loss += actor_loss
+                total_alpha_loss += alpha_loss
+                ac_updates = 1
+
             if episode % 10 == 0:
                 hard_update(self.critic_target, self.critic)
 
             episode_loss = (total_qf1_loss + total_qf2_loss) / (2 * ac_updates) if ac_updates > 0 else 0.0
 
             if ac_updates > 0:
-                writer.add_scalar("SAC/qf1_loss",   total_qf1_loss   / ac_updates, episode)
-                writer.add_scalar("SAC/qf2_loss",   total_qf2_loss   / ac_updates, episode)
-                writer.add_scalar("SAC/actor_loss", total_actor_loss / ac_updates, episode)
+                writer.add_scalar("SAC/qf1_loss",   total_qf1_loss,   episode)
+                writer.add_scalar("SAC/qf2_loss",   total_qf2_loss,   episode)
+                writer.add_scalar("SAC/actor_loss", total_actor_loss, episode)
+                writer.add_scalar("SAC/alpha_loss", total_alpha_loss, episode)
 
-            writer.add_scalar("Train/episode_reward", episode_reward, episode)
-            writer.add_scalar("Train/avg_critic_loss", episode_loss, episode)
-            writer.add_scalar("Train/best_score", best_score, episode)
-            writer.add_scalar("Train/episode_steps", episode_steps, episode)
+            writer.add_scalar("Train/episode_reward", episode_reward,  episode)
+            writer.add_scalar("Train/avg_critic_loss", episode_loss,   episode)
+            writer.add_scalar("Train/best_score",      best_score,     episode)
+            writer.add_scalar("Train/episode_steps",   episode_steps,  episode)
             writer.add_scalar("Buffer/fill", min(self.memory.mem_ctr, self.memory.mem_size), episode)
 
             if episode % 10 == 0:
