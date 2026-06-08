@@ -1,7 +1,6 @@
 import os
 import subprocess
 import gymnasium as gym
-from gymnasium.spaces import Box
 import numpy as np
 import torch
 from buffer import ReplayBuffer
@@ -36,14 +35,8 @@ class Agent:
         obs, _ = self.env.reset()
         obs = self.process_observation(obs)
 
-        # Actor operates in a structured 2D action space [steering, throttle_brake].
-        # throttle_brake ∈ [-1, 1]: positive → gas, negative → brake.
-        # decode_action() maps this to the 3D env action before env.step().
-        self.actor_action_space = Box(
-            low=np.array([-1.0, -1.0], dtype=np.float32),
-            high=np.array([1.0, 1.0], dtype=np.float32),
-        )
-        self.n_actions = self.actor_action_space.shape[0]  # 2
+        self.actor_action_space = env.action_space
+        self.n_actions = int(self.actor_action_space.shape[0])  # type: ignore[index]
         self.ac_hidden_size = 256
 
         self.memory = ReplayBuffer(
@@ -88,13 +81,6 @@ class Agent:
         self.tau = tau
 
         self.total_steps = 0
-
-    def decode_action(self, actor_action: np.ndarray) -> np.ndarray:
-        steering = float(actor_action[0])
-        tb       = float(actor_action[1])
-        gas      = max(0.0, tb)
-        brake    = max(0.0, -tb)
-        return np.array([steering, gas, brake], dtype=np.float32)
 
     def process_observation(self, obs):
         obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST)
@@ -186,7 +172,7 @@ class Agent:
             while not done:
                 obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
                 actor_action = self.select_action(obs_t, evaluate=True)
-                next_obs, reward, term, trunc, _ = self.env.step(self.decode_action(actor_action))
+                next_obs, reward, term, trunc, _ = self.env.step(actor_action)
                 next_obs = self.process_observation(next_obs)
                 done = term or trunc
                 episode_reward += float(reward)
@@ -213,9 +199,7 @@ class Agent:
         return action.detach().cpu().numpy()[0]
 
     def warmup_action(self) -> np.ndarray:
-        steering       = np.random.uniform(-1.0, 1.0)
-        throttle_brake = np.random.uniform(0.0, 1.0)
-        return np.array([steering, throttle_brake], dtype=np.float32)
+        return self.actor_action_space.sample()
 
     def train(self, episodes=1, offline_training_epochs=1, batch_size=32, warmup_episodes=5, run_tag=None):
 
@@ -256,8 +240,7 @@ class Agent:
                     obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
                     actor_action = self.select_action(obs_t)
 
-                car_action = self.decode_action(actor_action)
-                next_obs, reward, term, trunc, _ = self.env.step(car_action)
+                next_obs, reward, term, trunc, _ = self.env.step(actor_action)
 
                 next_obs     = self.process_observation(next_obs)
                 done         = term or trunc
