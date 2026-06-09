@@ -161,7 +161,7 @@ class Agent:
             self.episode_buffer.flush_to(
                 self.memory,
                 desired_goal=desired_goal,
-                compute_reward=self.env.compute_reward,  # type: ignore[attr-defined]
+                compute_reward=self.env.unwrapped.compute_reward,  # type: ignore[attr-defined]
             )
             self.episode_buffer.clear()
 
