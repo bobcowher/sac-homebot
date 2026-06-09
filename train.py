@@ -4,16 +4,16 @@ import homebot
 
 env = gym.make(
     "HomeBot2D-v1",
-    render_mode="rgb_array",   # "human", "rgb_array", or None
-    action_mode="continuous",    # "discrete" or "continuous"
-    obs_resolution=(96, 96),   # observation image size (H, W)
-    n_trash=2,                 # trash items per episode
-    max_steps=1000,            # steps before truncation
-    map_name="default",             # map layout
+    render_mode="rgb_array",
+    action_mode="discrete",
+    obs_resolution=(96, 96),
+    n_trash=2,
+    max_steps=1000,
+    map_name="default",
     goals=["trash"],
-    subgoals=True,            # True for LLM orchestration mode
+    subgoals=True,
 )
 
-agent = Agent(env=env, max_buffer_size=200000)
+agent = Agent(env=env, max_buffer_size=100000)
 
-agent.train(episodes=800, offline_training_epochs=400, batch_size=32)
+agent.train(episodes=1000, batch_size=64)
