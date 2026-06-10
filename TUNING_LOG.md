@@ -128,7 +128,8 @@ Result after ~530 episodes:
   stable Huber loss, should let the policy settle into a steadier, higher floor.
 - **Change:** `agent.py` Adam `lr=0.0001` → `lr=0.00005`. (Clean Huber baseline.)
 - **Tag/branch:** `tuning-lr`.
-- **Status:** RUNNING — run id below. Compare success rate vs Exp 1 (~32%).
+- **Run:** 228.
+- **Status:** RUNNING — compare success rate vs Exp 1 (~32%).
 
 > **Meta-note:** n=1 run per config; the 18–35% reward band is partly seed noise.
 > Huber is the one robust win (Q-loss 69→3 is consistent, not noise). If LR also
