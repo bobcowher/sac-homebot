@@ -62,15 +62,16 @@ class Agent:
         obs = torch.from_numpy(obs).permute(2, 0, 1)
         return obs
 
-    def select_action(self, obs):
+    def select_action(self, obs, goal):
         if random.random() < self.epsilon:
             return self.env.action_space.sample()
         with torch.no_grad():
-            obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
-            return self.q_model(obs_t).argmax(dim=1).item()
+            obs_t  = obs.unsqueeze(0).float().to(self.device) / 255.0
+            goal_t = torch.as_tensor(goal, dtype=torch.float32, device=self.device).unsqueeze(0)
+            return self.q_model(obs_t, goal_t).argmax(dim=1).item()
 
     def train_step(self, batch_size):
-        obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
+        obs, actions, rewards, next_obs, dones, goals = self.memory.sample_buffer(batch_size)
 
         obs      = obs      / 255.0
         next_obs = next_obs / 255.0
@@ -79,12 +80,11 @@ class Agent:
         rewards = rewards.unsqueeze(1)
         dones   = dones.unsqueeze(1).float()
 
-        q_values = self.q_model(obs)
-        q_sa     = q_values.gather(1, actions)
+        q_sa = self.q_model(obs, goals).gather(1, actions)
 
         with torch.no_grad():
-            next_actions = self.q_model(next_obs).argmax(dim=1, keepdim=True)
-            next_q       = self.target_q_model(next_obs).gather(1, next_actions)
+            next_actions = self.q_model(next_obs, goals).argmax(dim=1, keepdim=True)
+            next_q       = self.target_q_model(next_obs, goals).gather(1, next_actions)
             targets      = rewards + (1 - dones) * self.gamma * next_q
 
         loss = F.mse_loss(q_sa, targets)
@@ -145,7 +145,7 @@ class Agent:
             episode_steps  = 0
 
             while not done:
-                action = self.select_action(obs)
+                action = self.select_action(obs, desired_goal)
                 raw_next, reward, term, trunc, _ = self.env.step(action)
                 next_obs = self.process_observation(raw_next["observation"])
                 done = term or trunc
@@ -158,7 +158,7 @@ class Agent:
                 episode_steps  += 1
                 obs = next_obs
 
-            self.episode_buffer.flush_to(
+            self.episode_buffer.send_to(
                 self.memory,
                 desired_goal=desired_goal,
                 compute_reward=self.env.unwrapped.compute_reward,  # type: ignore[attr-defined]
@@ -194,14 +194,17 @@ class Agent:
 
         for episode in range(episodes):
             raw_obs, _ = self.env.reset()
-            obs = self.process_observation(raw_obs["observation"])
+            obs          = self.process_observation(raw_obs["observation"])
+            desired_goal = raw_obs["desired_goal"]
             done = False
             episode_reward = 0.0
 
             while not done:
                 with torch.no_grad():
                     obs_t  = obs.unsqueeze(0).float().to(self.device) / 255.0
-                    action = self.q_model(obs_t).argmax(dim=1).item()
+                    goal_t = torch.as_tensor(desired_goal, dtype=torch.float32,
+                                             device=self.device).unsqueeze(0)
+                    action = self.q_model(obs_t, goal_t).argmax(dim=1).item()
                 raw_next, reward, term, trunc, _ = self.env.step(action)
                 next_obs = self.process_observation(raw_next["observation"])
                 done = term or trunc
