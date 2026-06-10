@@ -150,8 +150,11 @@ class Agent:
                 next_obs = self.process_observation(raw_next["observation"])
                 done = term or trunc
 
+                # Store term (not trunc): a timeout is not a terminal state, so the
+                # target should still bootstrap from next_obs. Storing trunc as done
+                # trains Q toward 0 at far-from-goal states.
                 self.episode_buffer.store(
-                    obs, action, reward, next_obs, done,
+                    obs, action, reward, next_obs, term,
                     achieved_goal=raw_next["achieved_goal"],
                 )
                 episode_reward += float(reward)

@@ -78,6 +78,10 @@ class EpisodeBuffer:
                     hindsight_goal[np.newaxis],
                     {},
                 )[0])
+                # Success terminates in this env (reward > 0.5 -> terminated), so a
+                # relabeled success must be terminal too — otherwise targets bootstrap
+                # past the goal and inflate Q toward 1/(1-gamma) in hindsight data.
+                hindsight_done = hindsight_reward > 0.5
                 replay_buffer.store_transition(
-                    t.obs, t.action, hindsight_reward, t.next_obs, t.done, hindsight_goal
+                    t.obs, t.action, hindsight_reward, t.next_obs, hindsight_done, hindsight_goal
                 )

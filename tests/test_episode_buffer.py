@@ -54,6 +54,42 @@ def test_send_to_clears_nothing_on_its_own():
     assert len(ep) == 1, "send_to must not clear the buffer — caller does that"
 
 
+def test_hindsight_success_is_terminal():
+    """Relabeled success (reward 1) must store done=True; reward 0 stores done=False.
+
+    The env terminates on success, so hindsight transitions must match — otherwise
+    targets bootstrap past the goal and inflate Q in hindsight data.
+    """
+    def _success_compute_reward(ag, dg, info):
+        return np.ones(len(ag), dtype=np.float32)
+
+    ep  = EpisodeBuffer()
+    rep = _make_replay()
+    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
+    dg  = np.array([100.0, 100.0], dtype=np.float32)
+
+    for i in range(3):
+        ep.store(obs, 0, 0.0, obs, False,
+                 achieved_goal=np.array([float(i), float(i)], dtype=np.float32))
+
+    ep.send_to(rep, dg, _success_compute_reward)
+    # Layout: 3 original (reward 0 via stored value, done False) then hindsight.
+    # All hindsight rewards are 1.0 here -> all hindsight dones must be True.
+    n = rep.mem_ctr
+    assert n > 3, "expected hindsight transitions beyond the 3 originals"
+    assert not rep.terminal_memory[:3].any(), "original transitions must keep done=False"
+    assert rep.terminal_memory[3:n].all(), "hindsight successes must be terminal"
+
+    # And reward-0 relabels stay non-terminal.
+    ep2  = EpisodeBuffer()
+    rep2 = _make_replay()
+    for i in range(3):
+        ep2.store(obs, 0, 0.0, obs, False,
+                  achieved_goal=np.array([float(i), float(i)], dtype=np.float32))
+    ep2.send_to(rep2, dg, _dummy_compute_reward)
+    assert not rep2.terminal_memory[:rep2.mem_ctr].any(), "reward-0 relabels must stay done=False"
+
+
 def test_send_to_original_reward_preserved():
     ep  = EpisodeBuffer()
     rep = _make_replay()
