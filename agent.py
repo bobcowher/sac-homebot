@@ -51,7 +51,7 @@ class Agent:
         self.gamma = 0.99
         self.epsilon = 1.0
         self.min_epsilon = 0.1
-        self.epsilon_decay = 0.995
+        self.epsilon_decay = 0.977
 
         self.target_update_interval = target_update_interval
         self.total_steps = 0
@@ -165,7 +165,7 @@ class Agent:
             )
             self.episode_buffer.clear()
 
-            for _ in range(episode_steps):
+            for _ in range(800):
                 if self.memory.can_sample(batch_size):
                     episode_loss += self.train_step(batch_size)
 
