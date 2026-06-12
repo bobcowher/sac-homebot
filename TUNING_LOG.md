@@ -434,3 +434,21 @@ sweep-and-home policy is expressible — sufficiency is a learner question.
   (run 237 checkpoint, committed as pretrained/nav_primitive.pt). Tests whether
   ~5M frames of learned perception (trash/walls/furniture) transfers.
   fc layers fresh. A/B vs Exp 14.
+
+#### Exp 14b result (run 240, 1h12m)
+
+- **Starved identically to the baseline.** Final window (2400–2499):
+  2 single pickups, **0 full clears**, all 1000-step episodes. Early pickup
+  rate was marginally higher than run 239 (a handful more partials in the
+  first ~200 eps), consistent with slightly better perception, but the
+  endgame is indistinguishable.
+- **A/B verdict:** warm-started conv trunk does NOT fix V1 starvation.
+  The binding constraint is the reward signal, not perception — knowing what
+  trash looks like is useless when gradient batches almost never contain a
+  rewarded transition. Perception transfer stays on the shelf (harmless,
+  possibly mildly positive) for whenever the reward problem is solved.
+- **Next:** Exp 15 decision is Robert's. Menu: n-step returns (amplify the
+  ~5 partials/100 eps that random walk does produce), extended epsilon
+  (floor 0.2–0.3 — at floor 0.1 the near-greedy starved policy explores
+  almost nothing), RND/count-based exploration bonus, pickup-radius or spawn
+  curriculum, or jump to SAC (actor-critic parts shelf).
