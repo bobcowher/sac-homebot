@@ -1,5 +1,6 @@
 import os
 import subprocess
+from collections import deque
 import gymnasium as gym
 import numpy as np
 import torch
@@ -144,15 +145,19 @@ class Agent:
         self.actor.save_the_model("actor", verbose=True)
         self.critic.save_the_model("critic", verbose=True)
 
-    def save_best(self, score, episode):
+    def save_best(self, window_rate, episode):
+        # Checkpoint on rolling-100-episode success rate, not single-episode
+        # best: with sparse binary rewards a single 1.0 fires once and never
+        # again, so the saved policy is whatever got lucky first. The rolling
+        # window tracks sustained competence instead.
         path = "checkpoints/best.pt"
         torch.save({
             "episode": episode,
-            "score": score,
+            "window_rate": window_rate,
             "actor": self.actor.state_dict(),
             "critic": self.critic.state_dict(),
         }, path)
-        print(f"Saved best checkpoint to {path} | episode: {episode} | score: {score:.1f}")
+        print(f"Saved best checkpoint to {path} | episode: {episode} | success_rate_100: {window_rate:.3f}")
 
     def load(self):
         self.actor.load_the_model("actor", device=self.device)
@@ -201,7 +206,8 @@ class Agent:
     def warmup_action(self) -> np.ndarray:
         return self.actor_action_space.sample()
 
-    def train(self, episodes=1, offline_training_epochs=1, batch_size=32, warmup_episodes=5, run_tag=None):
+    def train(self, episodes=1, offline_training_epochs=1, batch_size=32,
+              warmup_episodes=5, run_tag=None, success_reward=2.0):
 
         if run_tag is None:
             try:
@@ -224,6 +230,8 @@ class Agent:
         writer = SummaryWriter(summary_writer_name)
 
         best_score = float("-inf")
+        success_window = deque(maxlen=100)
+        best_window_rate = -1.0
 
         for episode in range(episodes):
             obs, _ = self.env.reset()
@@ -257,7 +265,14 @@ class Agent:
 
             if episode_reward > best_score:
                 best_score = episode_reward
-                self.save_best(best_score, episode)
+
+            success_window.append(1.0 if episode_reward >= success_reward else 0.0)
+            window_rate = sum(success_window) / len(success_window)
+            # Only checkpoint once the window is full, so early lucky streaks on
+            # a near-empty deque can't masquerade as a high success rate.
+            if len(success_window) == success_window.maxlen and window_rate > best_window_rate:
+                best_window_rate = window_rate
+                self.save_best(window_rate, episode)
 
             total_qf1_loss   = 0.0
             total_qf2_loss   = 0.0
@@ -287,6 +302,7 @@ class Agent:
             writer.add_scalar("Train/episode_reward", episode_reward,  episode)
             writer.add_scalar("Train/avg_critic_loss", episode_loss,   episode)
             writer.add_scalar("Train/best_score",      best_score,     episode)
+            writer.add_scalar("Train/success_rate_100", window_rate,   episode)
             writer.add_scalar("Train/episode_steps",   episode_steps,  episode)
             writer.add_scalar("Buffer/fill", min(self.memory.mem_ctr, self.memory.mem_size), episode)
 
