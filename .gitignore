@@ -6,7 +6,7 @@ CONTEXT.md
 checkpoints
 *.png
 GEMINI.md
-test_*
+/test_*
 BEEKEEPER_*.md
 .claude/
 .qwen
