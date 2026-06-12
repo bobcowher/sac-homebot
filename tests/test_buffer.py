@@ -2,7 +2,6 @@
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import torch
-import numpy as np
 from buffer import ReplayBuffer
 
 
@@ -15,33 +14,33 @@ def _make_buf():
     )
 
 
-def _dummy_transition(buf, goal, next_goal):
+def test_round_trip_shapes():
+    buf = _make_buf()
     obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
-    buf.store_transition(obs, 3, 1.0, obs, False, goal, next_goal)
-
-
-def test_goals_stored_and_sampled():
-    buf       = _make_buf()
-    goal      = np.array([100.0, 200.0], dtype=np.float32)
-    next_goal = np.array([90.0, 190.0], dtype=np.float32)
     for _ in range(20):
-        _dummy_transition(buf, goal, next_goal)
-    _, _, _, _, _, goals, next_goals = buf.sample_buffer(10)
-    assert goals.shape == (10, 2), f"expected (10,2), got {goals.shape}"
-    assert next_goals.shape == (10, 2)
-    assert torch.allclose(goals, torch.tensor([100.0, 200.0]).expand(10, 2))
-    assert torch.allclose(next_goals, torch.tensor([90.0, 190.0]).expand(10, 2))
+        buf.store_transition(obs, 3, 1.0, obs, False)
+    states, actions, rewards, next_states, dones = buf.sample_buffer(10)
+    assert states.shape == (10, 3, 96, 96)
+    assert actions.shape == (10,)
+    assert rewards.shape == (10,)
+    assert next_states.shape == (10, 3, 96, 96)
+    assert dones.shape == (10,)
+    assert (actions == 3).all() and (rewards == 1.0).all()
 
 
-def test_different_goals_round_trip():
-    buf    = _make_buf()
-    goal_a = np.array([10.0, 20.0], dtype=np.float32)
-    goal_b = np.array([30.0, 40.0], dtype=np.float32)
+def test_term_flag_round_trip():
+    buf = _make_buf()
     obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
-    for _ in range(10):
-        buf.store_transition(obs, 0, 0.0, obs, False, goal_a, goal_b)
-    for _ in range(10):
-        buf.store_transition(obs, 0, 0.0, obs, False, goal_b, goal_a)
-    _, _, _, _, _, goals, next_goals = buf.sample_buffer(20)
-    assert goals.shape == (20, 2)
-    assert next_goals.shape == (20, 2)
+    buf.store_transition(obs, 0, 1.0, obs, False)   # mid-episode pickup
+    buf.store_transition(obs, 0, 1.0, obs, True)    # final pickup terminates
+    assert not bool(buf.terminal_memory[0])
+    assert bool(buf.terminal_memory[1])
+
+
+def test_wraparound():
+    buf = _make_buf()
+    obs = torch.zeros(3, 96, 96, dtype=torch.uint8)
+    for i in range(150):
+        buf.store_transition(obs, i % 8, 0.0, obs, False)
+    assert buf.mem_ctr == 150
+    assert buf.can_sample(10)

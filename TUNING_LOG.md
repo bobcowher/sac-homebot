@@ -404,3 +404,33 @@ gap to consistent 1s.
   best rolling-100 success rate, every run, so eval can test the peak policy;
   (2) late-run fade at 200k buffer appears once the buffer is dominated by
   long failure episodes — future lever: LR decay or larger buffer late.
+
+---
+
+## V1 pivot (2026-06-12)
+
+Direction (Robert): the goal env was HER scaffolding; strategies must transpose
+to advanced sims with no oracle goal coords. Main line moves to plain
+`HomeBot2D-V1`: image-only obs, reward on task events, no goal input. Trash is
+a within-episode search task (16px pickup radius, vs 79px goal threshold);
+fixture tasks come later. check_aliasing.py confirmed every robot position
+renders a distinct view (min 11 RMS at distance, 0 duplicates), so a memoryless
+sweep-and-home policy is expressible — sufficiency is a learner question.
+
+### Exp 14 — V1 trash baseline (branch v1-trash)
+
+- Plain Double-DQN port of the debugged machinery: Huber, LR 5e-5, hard target
+  /1000, 800 grad-steps/ep, 200k uint8 buffer, term-not-trunc semantics.
+  HER stripped (no goal space). Epsilon decay slowed 0.977 → 0.99: without HER,
+  early exploration is the only reward source.
+- New: rolling-100-window best checkpointing (`q_model_best.pt`) — run 237's
+  peak policy was lost to late fade; never again.
+- Success = episode_reward 2.0 (both trash). Watch early discovery rate: if
+  epsilon-greedy never touches trash, n-step returns (Exp 15) move up.
+
+### Exp 14b — conv-trunk warm start (branch v1-trash-warmstart)
+
+- Identical to Exp 14, plus conv1-3 initialized from the Exp 13 nav primitive
+  (run 237 checkpoint, committed as pretrained/nav_primitive.pt). Tests whether
+  ~5M frames of learned perception (trash/walls/furniture) transfers.
+  fc layers fresh. A/B vs Exp 14.

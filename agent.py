@@ -1,5 +1,6 @@
 import os
 import subprocess
+from collections import deque
 import gymnasium as gym
 import torch
 import torch.nn.functional as F
@@ -7,16 +8,21 @@ import random
 import cv2
 import datetime
 from buffer import ReplayBuffer
-from episode_buffer import EpisodeBuffer
 from models.q_model import QModel
 from torch.utils.tensorboard.writer import SummaryWriter
 
 
 class Agent:
+    """Plain Double-DQN on HomeBot2D-V1 (image-only obs, sparse task rewards).
+
+    No HER — the plain env has no goal space. Success metric for the trash
+    task is episode_reward == n_trash (all trash collected).
+    """
 
     def __init__(self, env: gym.Env,
                        max_buffer_size: int = 100000,
-                       target_update_interval: int = 1000) -> None:
+                       target_update_interval: int = 1000,
+                       pretrained_conv: str | None = None) -> None:
         self.env = env
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
 
@@ -24,7 +30,7 @@ class Agent:
         os.makedirs("runs", exist_ok=True)
 
         raw_obs, _ = self.env.reset()
-        obs = self.process_observation(raw_obs["observation"])
+        obs = self.process_observation(raw_obs)
 
         self.n_actions = self.env.action_space.n  # type: ignore[union-attr]
 
@@ -40,6 +46,9 @@ class Agent:
             input_shape=obs.shape,
         ).to(self.device)
 
+        if pretrained_conv is not None:
+            self.q_model.load_conv_trunk(pretrained_conv, device=self.device)
+
         self.target_q_model = QModel(
             action_dim=self.n_actions,
             input_shape=obs.shape,
@@ -51,28 +60,27 @@ class Agent:
         self.gamma = 0.99
         self.epsilon = 1.0
         self.min_epsilon = 0.1
-        self.epsilon_decay = 0.977
+        # Slower decay than the goal-env line (0.977): without HER, early
+        # exploration is the only source of reward events.
+        self.epsilon_decay = 0.99
 
         self.target_update_interval = target_update_interval
         self.total_steps = 0
-        self.episode_buffer = EpisodeBuffer()
 
     def process_observation(self, obs):
         obs = cv2.resize(obs, (96, 96), interpolation=cv2.INTER_NEAREST)
         obs = torch.from_numpy(obs).permute(2, 0, 1)
         return obs
 
-    def select_action(self, obs, rel_goal):
-        """rel_goal: desired_goal - current robot position (map pixels)."""
+    def select_action(self, obs):
         if random.random() < self.epsilon:
             return self.env.action_space.sample()
         with torch.no_grad():
-            obs_t  = obs.unsqueeze(0).float().to(self.device) / 255.0
-            goal_t = torch.as_tensor(rel_goal, dtype=torch.float32, device=self.device).unsqueeze(0)
-            return self.q_model(obs_t, goal_t).argmax(dim=1).item()
+            obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
+            return self.q_model(obs_t).argmax(dim=1).item()
 
     def train_step(self, batch_size):
-        obs, actions, rewards, next_obs, dones, goals, next_goals = self.memory.sample_buffer(batch_size)
+        obs, actions, rewards, next_obs, dones = self.memory.sample_buffer(batch_size)
 
         obs      = obs      / 255.0
         next_obs = next_obs / 255.0
@@ -81,11 +89,11 @@ class Agent:
         rewards = rewards.unsqueeze(1)
         dones   = dones.unsqueeze(1).float()
 
-        q_sa = self.q_model(obs, goals).gather(1, actions)
+        q_sa = self.q_model(obs).gather(1, actions)
 
         with torch.no_grad():
-            next_actions = self.q_model(next_obs, next_goals).argmax(dim=1, keepdim=True)
-            next_q       = self.target_q_model(next_obs, next_goals).gather(1, next_actions)
+            next_actions = self.q_model(next_obs).argmax(dim=1, keepdim=True)
+            next_q       = self.target_q_model(next_obs).gather(1, next_actions)
             targets      = rewards + (1 - dones) * self.gamma * next_q
 
         loss = F.smooth_l1_loss(q_sa, targets)
@@ -108,7 +116,8 @@ class Agent:
         self.q_model.load_the_model("q_model", device=self.device)
         self.target_q_model.load_state_dict(self.q_model.state_dict())
 
-    def train(self, episodes=1000, batch_size=64, run_tag=None):
+    def train(self, episodes=1000, batch_size=64, run_tag=None, grad_steps=800,
+              success_reward=2.0):
         if run_tag is None:
             try:
                 refs = subprocess.check_output(
@@ -128,11 +137,15 @@ class Agent:
 
         writer = SummaryWriter(f'runs/{datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")}_{run_tag}')
 
+        # Rolling-window-best checkpointing: the final weights of a long run
+        # can come from a faded stretch (run 237 lesson). Save the peak policy
+        # so eval can test it.
+        success_window = deque(maxlen=100)
+        best_window_rate = -1.0
+
         for episode in range(episodes):
             raw_obs, _ = self.env.reset()
-            obs          = self.process_observation(raw_obs["observation"])
-            desired_goal = raw_obs["desired_goal"]
-            pos          = raw_obs["achieved_goal"]
+            obs = self.process_observation(raw_obs)
 
             done = False
             episode_reward = 0.0
@@ -140,45 +153,39 @@ class Agent:
             episode_steps  = 0
 
             while not done:
-                action = self.select_action(obs, desired_goal - pos)
+                action = self.select_action(obs)
                 raw_next, reward, term, trunc, _ = self.env.step(action)
-                next_obs = self.process_observation(raw_next["observation"])
-                next_pos = raw_next["achieved_goal"]
+                next_obs = self.process_observation(raw_next)
                 done = term or trunc
 
-                # Store term (not trunc): a timeout is not a terminal state, so the
-                # target should still bootstrap from next_obs. Storing trunc as done
-                # trains Q toward 0 at far-from-goal states.
-                self.episode_buffer.store(
-                    obs, action, reward, next_obs, term,
-                    achieved_prev=pos,
-                    achieved_next=next_pos,
-                )
+                # Store term (not trunc): a timeout is not a terminal state, so
+                # the target should still bootstrap from next_obs.
+                self.memory.store_transition(obs, action, reward, next_obs, term)
                 episode_reward += float(reward)
                 episode_steps  += 1
                 obs = next_obs
-                pos = next_pos
 
-            self.episode_buffer.send_to(
-                self.memory,
-                desired_goal=desired_goal,
-                compute_reward=self.env.unwrapped.compute_reward,  # type: ignore[attr-defined]
-            )
-            self.episode_buffer.clear()
-
-            for _ in range(800):
+            for _ in range(grad_steps):
                 if self.memory.can_sample(batch_size):
                     episode_loss += self.train_step(batch_size)
 
             self.epsilon = max(self.min_epsilon, self.epsilon * self.epsilon_decay)
 
+            success_window.append(1.0 if episode_reward >= success_reward else 0.0)
+            window_rate = sum(success_window) / len(success_window)
+            if len(success_window) == success_window.maxlen and window_rate > best_window_rate:
+                best_window_rate = window_rate
+                self.q_model.save_the_model("q_model_best", verbose=True)
+                print(f"New best 100-ep success rate: {window_rate:.2f} at episode {episode}")
+
             avg_loss = episode_loss / episode_steps if episode_steps > 0 else 0.0
             print(f"Episode {episode} | reward: {episode_reward:.1f} | epsilon: {self.epsilon:.3f} | steps: {episode_steps}")
 
-            writer.add_scalar("Train/episode_reward", episode_reward, episode)
-            writer.add_scalar("Train/epsilon",         self.epsilon,   episode)
-            writer.add_scalar("Train/avg_q_loss",      avg_loss,       episode)
-            writer.add_scalar("Train/episode_steps",   episode_steps,  episode)
+            writer.add_scalar("Train/episode_reward",    episode_reward, episode)
+            writer.add_scalar("Train/epsilon",           self.epsilon,   episode)
+            writer.add_scalar("Train/avg_q_loss",        avg_loss,       episode)
+            writer.add_scalar("Train/episode_steps",     episode_steps,  episode)
+            writer.add_scalar("Train/success_rate_100",  window_rate,    episode)
             writer.add_scalar("Buffer/fill", min(self.memory.mem_ctr, self.memory.mem_size), episode)
 
             if episode % 10 == 0:
@@ -190,24 +197,18 @@ class Agent:
 
         for episode in range(episodes):
             raw_obs, _ = self.env.reset()
-            obs          = self.process_observation(raw_obs["observation"])
-            desired_goal = raw_obs["desired_goal"]
-            pos          = raw_obs["achieved_goal"]
+            obs = self.process_observation(raw_obs)
             done = False
             episode_reward = 0.0
 
             while not done:
                 with torch.no_grad():
-                    obs_t  = obs.unsqueeze(0).float().to(self.device) / 255.0
-                    goal_t = torch.as_tensor(desired_goal - pos, dtype=torch.float32,
-                                             device=self.device).unsqueeze(0)
-                    action = self.q_model(obs_t, goal_t).argmax(dim=1).item()
+                    obs_t = obs.unsqueeze(0).float().to(self.device) / 255.0
+                    action = self.q_model(obs_t).argmax(dim=1).item()
                 raw_next, reward, term, trunc, _ = self.env.step(action)
-                next_obs = self.process_observation(raw_next["observation"])
+                obs = self.process_observation(raw_next)
                 done = term or trunc
                 episode_reward += float(reward)
-                obs = next_obs
-                pos = raw_next["achieved_goal"]
 
             total_rewards.append(episode_reward)
             print(f"Test episode {episode} | reward: {episode_reward:.1f}")

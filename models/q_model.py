@@ -5,14 +5,8 @@ from models.base import BaseModel
 
 
 class QModel(BaseModel):
-    def __init__(self, action_dim, input_shape=(3, 96, 96), goal_dim=2,
-                 goal_scale=(864.0, 576.0)):
+    def __init__(self, action_dim, input_shape=(3, 96, 96)):
         super(QModel, self).__init__()
-
-        # Goals arrive as relative displacements in raw map pixels
-        # (goal - robot position, default map: 864x576). Scale to [-1, 1] so
-        # the goal encoder sees the same input range as the obs branch.
-        self.register_buffer("goal_scale", torch.tensor(goal_scale, dtype=torch.float32))
 
         self.conv1 = nn.Conv2d(input_shape[0], 32, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(32, 64, kernel_size=4, stride=2)
@@ -22,13 +16,12 @@ class QModel(BaseModel):
             dummy = torch.zeros(1, *input_shape)
             flat_size = self._conv_forward(dummy).shape[1]
 
-        self.goal_encoder = nn.Linear(goal_dim, 128)
-        self.fc1    = nn.Linear(flat_size + 128, 512)
+        self.fc1    = nn.Linear(flat_size, 512)
         self.output = nn.Linear(512, action_dim)
 
         self.apply(self._weights_init)
 
-        print(f"QModel: input={input_shape}, conv_flat={flat_size}, goal_dim={goal_dim}, actions={action_dim}")
+        print(f"QModel: input={input_shape}, conv_flat={flat_size}, actions={action_dim}")
 
     def _conv_forward(self, x):
         x = F.relu(self.conv1(x))
@@ -36,17 +29,30 @@ class QModel(BaseModel):
         x = F.relu(self.conv3(x))
         return x.flatten(1)
 
-    def encode_goal(self, goal):
-        """Scale raw pixel displacement to [-1, 1] and encode. All goal encoding
-        must go through here so the scaling can't be bypassed."""
-        return self.goal_encoder(goal / self.goal_scale)
-
-    def forward(self, obs, goal):
+    def forward(self, obs):
         x = self._conv_forward(obs)
-        g = self.encode_goal(goal)
-        x = torch.cat([x, g], dim=1)
         x = F.relu(self.fc1(x))
         return self.output(x)
+
+    def load_conv_trunk(self, path, device='cpu'):
+        """Warm-start conv1-3 from a checkpoint trained on another task.
+
+        Only conv weights transfer — fc layers are task-specific (and may have
+        different shapes, e.g. the goal-conditioned net's fc1). Extra keys in
+        the source checkpoint are ignored.
+        """
+        state = torch.load(path, map_location=device)
+        if "q_model" in state:
+            state = state["q_model"]
+        own = self.state_dict()
+        loaded = []
+        for k, v in state.items():
+            if k.startswith(("conv1.", "conv2.", "conv3.")) and k in own and own[k].shape == v.shape:
+                own[k] = v
+                loaded.append(k)
+        self.load_state_dict(own)
+        print(f"Warm-started conv trunk from {path}: {loaded}")
+        return loaded
 
     def _weights_init(self, m):
         if isinstance(m, (nn.Linear, nn.Conv2d)):

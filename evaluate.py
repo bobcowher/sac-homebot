@@ -1,13 +1,13 @@
-"""Greedy evaluation of downloaded checkpoints.
+"""Greedy evaluation of downloaded checkpoints on HomeBot2D-V1 (trash task).
 
-Runs N fully-greedy episodes (epsilon=0) per checkpoint and reports success
-percentage. Env config matches train.py exactly so the numbers are comparable
-to the training chart minus the epsilon-0.1 exploration noise.
+Runs N episodes per checkpoint and reports trash collected per episode plus
+the full-clear rate (all trash collected = success). Env config matches
+train.py exactly.
 
 Usage:
-    python3 evaluate.py                  # 100 episodes, q_model.pt + best.pt
-    python3 evaluate.py --episodes 20
-    python3 evaluate.py --checkpoints checkpoints/q_model.pt
+    python3 evaluate.py                  # 100 greedy episodes, q_model.pt
+    python3 evaluate.py --checkpoints checkpoints/q_model_best.pt
+    python3 evaluate.py --epsilon 0.1    # reproduce training conditions
 """
 
 import argparse
@@ -20,32 +20,32 @@ import torch
 import homebot  # noqa: F401  (side-effect env registration)
 from models.q_model import QModel
 
+N_TRASH = 2
+
 
 def make_env():
-    # Local homebot registers -V1 (capital), remote registers -v1.
-    for env_id in ("HomeBot2D-Goal-v1", "HomeBot2D-Goal-V1"):
+    for env_id in ("HomeBot2D-v1", "HomeBot2D-V1"):
         try:
             env = gym.make(
                 env_id,
                 render_mode="rgb_array",
                 action_mode="discrete",
                 obs_resolution=(96, 96),
-                n_trash=2,
+                n_trash=N_TRASH,
                 max_steps=1000,
                 map_name="default",
-                goals=["collect_trash"],
+                goals=["trash"],
             )
             print(f"Env: {env_id}")
             return env
         except gym.error.Error:
             continue
-    raise RuntimeError("No HomeBot2D-Goal env id registered")
+    raise RuntimeError("No HomeBot2D env id registered")
 
 
 def load_q_model(path, n_actions, device):
     state = torch.load(path, map_location=device)
-    if "q_model" in state:  # best.pt wraps the state_dict with metadata
-        print(f"  ({path} is a best-checkpoint from episode {state.get('episode')})")
+    if "q_model" in state:
         state = state["q_model"]
     model = QModel(action_dim=n_actions).to(device)
     model.load_state_dict(state)
@@ -59,14 +59,12 @@ def process_observation(obs):
 
 
 def evaluate(model, env, episodes, device, epsilon=0.0):
-    successes = 0
-    success_steps = []
+    full_clears = 0
+    total_trash = 0.0
 
     for episode in range(episodes):
         raw_obs, _ = env.reset()
-        obs = process_observation(raw_obs["observation"])
-        desired_goal = raw_obs["desired_goal"]
-        pos = raw_obs["achieved_goal"]
+        obs = process_observation(raw_obs)
 
         done = False
         steps = 0
@@ -78,27 +76,22 @@ def evaluate(model, env, episodes, device, epsilon=0.0):
             else:
                 with torch.no_grad():
                     obs_t = obs.unsqueeze(0).float().to(device) / 255.0
-                    # Relative goal changes every step as the robot moves.
-                    goal_t = torch.as_tensor(
-                        desired_goal - pos, dtype=torch.float32, device=device
-                    ).unsqueeze(0)
-                    action = model(obs_t, goal_t).argmax(dim=1).item()
+                    action = model(obs_t).argmax(dim=1).item()
             raw_next, reward, term, trunc, _ = env.step(action)
-            obs = process_observation(raw_next["observation"])
-            pos = raw_next["achieved_goal"]
+            obs = process_observation(raw_next)
             done = term or trunc
             episode_reward += float(reward)
             steps += 1
 
-        if episode_reward > 0.5:
-            successes += 1
-            success_steps.append(steps)
-        print(f"Episode {episode} | reward: {episode_reward:.1f} | steps: {steps}")
+        total_trash += episode_reward
+        if episode_reward >= N_TRASH:
+            full_clears += 1
+        print(f"Episode {episode} | trash: {episode_reward:.1f} | steps: {steps}")
 
-    pct = 100.0 * successes / episodes
-    avg_steps = sum(success_steps) / len(success_steps) if success_steps else float("nan")
-    print(f"\nSuccess: {successes}/{episodes} = {pct:.0f}% | avg steps on success: {avg_steps:.0f}")
-    return pct
+    pct = 100.0 * full_clears / episodes
+    avg = total_trash / episodes
+    print(f"\nFull clears: {full_clears}/{episodes} = {pct:.0f}% | avg trash/episode: {avg:.2f}")
+    return pct, avg
 
 
 def main():
@@ -125,8 +118,8 @@ def main():
         results[path] = evaluate(model, env, args.episodes, device, args.epsilon)
 
     print("\n=== Summary ===")
-    for path, pct in results.items():
-        print(f"{path}: {pct:.0f}%")
+    for path, (pct, avg) in results.items():
+        print(f"{path}: {pct:.0f}% full clears, {avg:.2f} avg trash")
 
 
 if __name__ == "__main__":
