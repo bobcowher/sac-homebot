@@ -434,3 +434,16 @@ sweep-and-home policy is expressible — sufficiency is a learner question.
   (run 237 checkpoint, committed as pretrained/nav_primitive.pt). Tests whether
   ~5M frames of learned perception (trash/walls/furniture) transfers.
   fc layers fresh. A/B vs Exp 14.
+
+#### Exp 14 result (run 239, 1h49m)
+
+- **Starved, as the baseline was designed to measure.** Final window
+  (2400–2499): 5 single pickups, **0 full clears**, every episode the full
+  1000 steps. Whole-run pattern identical — reward events ~1 per 25–50k
+  transitions; with batch-64 sampling from a 200k buffer, most gradient steps
+  never see a rewarded transition. Epsilon-greedy + 16px pickup radius does
+  not bootstrap on its own. Greedy eval skipped (nothing to evaluate —
+  q_model_best.pt never saved, rolling success rate stayed 0).
+- **Verdict:** baseline datapoint recorded. HER was carrying the entire
+  sparse-reward burden in the goal env; V1 needs a replacement mechanism,
+  not more episodes.
