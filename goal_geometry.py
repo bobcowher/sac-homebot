@@ -9,8 +9,8 @@ GOAL_RADIUS = 40.0           # px; within this the goal is "reached"
 # Reward scale is DECOUPLED from the goal-vector normaliser. Per-px progress must
 # dominate the SAC entropy term (~0.1-0.5/step at alpha=0.1), or the actor just
 # inflates entropy and thrashes. 0.1/px => ~0.4 reward for a full-speed step.
-PROGRESS_SCALE = 0.1
-SUCCESS_REWARD = 5.0
+PROGRESS_SCALE = 0.03
+SUCCESS_REWARD = 1.0
 
 
 def distance(ax, ay, bx, by):
