@@ -27,7 +27,7 @@ def _soft_update(target, source, tau):
 
 
 class ReacherAgent:
-    def __init__(self, env, max_buffer_size=100000, alpha=0.1, tau=0.005,
+    def __init__(self, env, max_buffer_size=100000, alpha=0.05, tau=0.005,
                  gamma=0.99, start_radius=150.0, max_radius=600.0):
         self.env = env
         self.device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
