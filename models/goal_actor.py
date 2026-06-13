@@ -1,4 +1,5 @@
 # models/goal_actor.py
+# MLP actor head operating on a precomputed (shared-encoder) embedding + polar goal.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,17 +12,10 @@ EPS = 1e-6
 
 
 class GoalActor(BaseModel):
-    def __init__(self, input_shape, goal_dim, n_actions, hidden_dim,
+    def __init__(self, embed_dim, goal_dim, n_actions, hidden_dim,
                  action_space=None, checkpoint_dir='checkpoints', name='goal_actor'):
         super().__init__()
-        c, h, w = input_shape
-        self.conv1 = nn.Conv2d(c, 32, 3, stride=2, padding=1)    # 96->48
-        self.conv2 = nn.Conv2d(32, 64, 3, stride=2, padding=1)   # 48->24
-        self.conv3 = nn.Conv2d(64, 128, 3, stride=2, padding=1)  # 24->12
-        self.flatten = nn.Flatten()
-        conv_dim = 128 * (h // 8) * (w // 8)
-
-        self.linear1 = nn.Linear(conv_dim + goal_dim, hidden_dim)
+        self.linear1 = nn.Linear(embed_dim + goal_dim, hidden_dim)
         self.linear2 = nn.Linear(hidden_dim, hidden_dim)
         self.mean_linear = nn.Linear(hidden_dim, n_actions)
         self.log_std_linear = nn.Linear(hidden_dim, n_actions)
@@ -38,24 +32,16 @@ class GoalActor(BaseModel):
             self.action_scale = torch.FloatTensor((action_space.high - action_space.low) / 2.0)
             self.action_bias = torch.FloatTensor((action_space.high + action_space.low) / 2.0)
 
-    def _features(self, img, goal):
-        x = F.relu(self.conv1(img))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
-        x = self.flatten(x)
-        x = torch.cat([x, goal], dim=1)
+    def forward(self, embed, goal):
+        x = torch.cat([embed, goal], dim=1)
         x = F.relu(self.linear1(x))
         x = F.relu(self.linear2(x))
-        return x
-
-    def forward(self, img, goal):
-        x = self._features(img, goal)
         mean = self.mean_linear(x)
         log_std = torch.clamp(self.log_std_linear(x), LOG_SIG_MIN, LOG_SIG_MAX)
         return mean, log_std
 
-    def sample(self, img, goal):
-        mean, log_std = self.forward(img, goal)
+    def sample(self, embed, goal):
+        mean, log_std = self.forward(embed, goal)
         std = log_std.exp()
         normal = Normal(mean, std)
         x_t = normal.rsample()
