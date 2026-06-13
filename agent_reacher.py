@@ -10,6 +10,7 @@ import datetime
 import cv2
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
 from torch.utils.tensorboard.writer import SummaryWriter
@@ -64,8 +65,18 @@ class ReacherAgent:
         self.critic_target = GoalCritic(EMBED_DIM, GOAL_DIM, self.n_actions, hid).to(self.device)
         _hard_update(self.critic_target, self.critic)
 
+        # Reward-prediction head: predicts the (dense) reach reward from (embed, goal,
+        # action). Its gradient flows into the encoder, FORCING the encoder to retain
+        # reward-relevant features — the world-model lesson that recon alone (task-
+        # agnostic) drops task-critical detail. A core stabiliser in the WM project.
+        self.reward_head = nn.Sequential(
+            nn.Linear(EMBED_DIM + GOAL_DIM + self.n_actions, 256), nn.ReLU(),
+            nn.Linear(256, 1),
+        ).to(self.device)
+
         self.encoder_optim = Adam(self.encoder.parameters(), lr=1e-3)
         self.decoder_optim = Adam(self.decoder.parameters(), lr=1e-3)
+        self.reward_head_optim = Adam(self.reward_head.parameters(), lr=1e-3)
         self.actor_optim = Adam(self.actor.parameters(), lr=3e-5)
         self.critic_optim = Adam(self.critic.parameters(), lr=1e-4)
 
@@ -120,13 +131,18 @@ class ReacherAgent:
         torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), 1.0)
         self.critic_optim.step(); self.encoder_optim.step()
 
-        # ---- Autoencoder: recon GROUNDS/regularises the encoder (more than TD alone) ----
+        # ---- Encoder grounding: reconstruction + reward-prediction ----
+        # recon regularises; reward-prediction injects task signal so the encoder
+        # keeps reward-relevant features (recon alone is task-agnostic — WM lesson).
         embed_ae = self.encoder(img_s)
         recon = self.decoder(embed_ae)
         recon_loss = F.l1_loss(recon, img_s) + 0.2 * ssim_loss(recon, img_s)
-        self.encoder_optim.zero_grad(); self.decoder_optim.zero_grad()
-        recon_loss.backward()
-        self.encoder_optim.step(); self.decoder_optim.step()
+        r_hat = self.reward_head(torch.cat([embed_ae, goal_s, action], dim=1))
+        reward_pred_loss = F.mse_loss(r_hat, reward)
+        aux_loss = recon_loss + reward_pred_loss
+        self.encoder_optim.zero_grad(); self.decoder_optim.zero_grad(); self.reward_head_optim.zero_grad()
+        aux_loss.backward()
+        self.encoder_optim.step(); self.decoder_optim.step(); self.reward_head_optim.step()
 
         # ---- Actor: encoder DETACHED (policy must not destabilise the representation) ----
         with torch.no_grad():
@@ -139,7 +155,7 @@ class ReacherAgent:
 
         _soft_update(self.critic_target, self.critic, self.tau)
         _soft_update(self.encoder_target, self.encoder, self.tau)
-        return critic_loss.item(), actor_loss.item(), recon_loss.item()
+        return critic_loss.item(), actor_loss.item(), recon_loss.item(), reward_pred_loss.item()
 
     def greedy_eval(self, episodes=50, max_steps=300):
         self.actor.eval(); self.encoder.eval()
@@ -210,13 +226,14 @@ class ReacherAgent:
                 if reached or trunc:
                     break
 
-            closs = aloss = rloss = 0.0
+            closs = aloss = rloss = rploss = 0.0
             if episode >= warmup_episodes and self.memory.can_sample(batch_size):
                 for _ in range(grad_steps):
-                    closs, aloss, rloss = self.train_step(batch_size)
+                    closs, aloss, rloss, rploss = self.train_step(batch_size)
                 writer.add_scalar("SAC/critic_loss", closs, episode)
                 writer.add_scalar("SAC/actor_loss", aloss, episode)
                 writer.add_scalar("AE/recon_loss", rloss, episode)
+                writer.add_scalar("AE/reward_pred_loss", rploss, episode)
             writer.add_scalar("Train/reaches_per_episode", ep_reaches, episode)
 
             if episode % eval_every == 0 and episode >= warmup_episodes:
