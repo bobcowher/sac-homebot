@@ -20,4 +20,4 @@ def make_env():
 env = make_env()
 agent = ReacherAgent(env, max_buffer_size=100000, start_radius=150.0, max_radius=600.0)
 agent.train(episodes=2000, max_steps=300, batch_size=256, warmup_episodes=10,
-            grad_steps=300, eval_every=25)
+            grad_steps=50, eval_every=25)
