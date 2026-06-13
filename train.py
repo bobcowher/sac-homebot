@@ -1,23 +1,21 @@
+# train.py
 from agent import Agent
 import gymnasium as gym
 import homebot  # noqa: F401  (side-effect env registration)
 
 
 def make_env():
-    # Remote homebot registers lowercase -v1, local registers -V1.
     for env_id in ("HomeBot2D-v1", "HomeBot2D-V1"):
         try:
             env = gym.make(
                 env_id,
-                render_mode="rgb_array",   # "human", "rgb_array", or None
-                action_mode="continuous",  # SAC: continuous Box action space
-                obs_resolution=(96, 96),   # observation image size (H, W)
-                n_trash=2,                 # trash items per episode
-                max_steps=1000,            # steps before truncation
-                map_name="default",        # map layout
+                render_mode="rgb_array",
+                action_mode="continuous",  # world-model SAC: continuous Box actions
+                obs_resolution=(96, 96),
+                n_trash=2,
+                max_steps=1000,
+                map_name="default",
                 goals=["trash"],
-                # subgoals omitted: defaults to False (plain trash task). The
-                # local -V1 build predates the kwarg and rejects it outright.
             )
             print(f"Env: {env_id}")
             return env
@@ -28,6 +26,7 @@ def make_env():
 
 env = make_env()
 
-agent = Agent(env=env, max_buffer_size=200000)
+agent = Agent(env=env, max_buffer_size=200000, wm_sequence_length=50)
 
-agent.train(episodes=800, offline_training_epochs=400, batch_size=32)
+agent.train(episodes=1200, offline_training_epochs=200, batch_size=32,
+            wm_batch_size=200, imagination_steps=4, real_ratio=0.5)
