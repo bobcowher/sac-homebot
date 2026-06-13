@@ -24,8 +24,14 @@ class GoalCritic(BaseModel):
         self.conv_b = conv_stack()
         self.flatten = nn.Flatten()
         in_dim = conv_dim + goal_dim + n_actions
-        self.a1 = nn.Linear(in_dim, hidden_dim); self.a2 = nn.Linear(hidden_dim, hidden_dim); self.a_out = nn.Linear(hidden_dim, 1)
-        self.b1 = nn.Linear(in_dim, hidden_dim); self.b2 = nn.Linear(hidden_dim, hidden_dim); self.b_out = nn.Linear(hidden_dim, 1)
+        # LayerNorm after each linear — standard SAC value-stabiliser (matches the
+        # main-branch critic). Without it the twin-Q can overestimate and diverge.
+        self.a1 = nn.Linear(in_dim, hidden_dim); self.a_ln1 = nn.LayerNorm(hidden_dim)
+        self.a2 = nn.Linear(hidden_dim, hidden_dim); self.a_ln2 = nn.LayerNorm(hidden_dim)
+        self.a_out = nn.Linear(hidden_dim, 1)
+        self.b1 = nn.Linear(in_dim, hidden_dim); self.b_ln1 = nn.LayerNorm(hidden_dim)
+        self.b2 = nn.Linear(hidden_dim, hidden_dim); self.b_ln2 = nn.LayerNorm(hidden_dim)
+        self.b_out = nn.Linear(hidden_dim, 1)
 
         self.name = name
         self.checkpoint_dir = checkpoint_dir
@@ -41,6 +47,10 @@ class GoalCritic(BaseModel):
     def forward(self, img, goal, action):
         fa = torch.cat([self._encode(self.conv_a, img), goal, action], dim=1)
         fb = torch.cat([self._encode(self.conv_b, img), goal, action], dim=1)
-        q1 = self.a_out(F.relu(self.a2(F.relu(self.a1(fa)))))
-        q2 = self.b_out(F.relu(self.b2(F.relu(self.b1(fb)))))
+        x1 = F.relu(self.a_ln1(self.a1(fa)))
+        x1 = F.relu(self.a_ln2(self.a2(x1)))
+        q1 = self.a_out(x1)
+        x2 = F.relu(self.b_ln1(self.b1(fb)))
+        x2 = F.relu(self.b_ln2(self.b2(x2)))
+        q2 = self.b_out(x2)
         return q1, q2
