@@ -26,7 +26,7 @@ def make_env():
 
 env = make_env()
 
-agent = Agent(env=env, max_buffer_size=200000, wm_sequence_length=50)
+agent = Agent(env=env, max_buffer_size=100000, wm_sequence_length=50)
 
 agent.train(episodes=1200, offline_training_epochs=200, batch_size=32,
             wm_batch_size=200, imagination_steps=4, real_ratio=0.5)
