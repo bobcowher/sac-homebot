@@ -165,8 +165,11 @@ class ReacherAgent:
                 obs = nobs_t
                 if reached:
                     ep_reaches += 1
-                    self.goals.reset(base)   # new waypoint, keep episode going
-                if trunc:
+                # Single-goal episodes (standard PointNav): end on reach OR trunc, so
+                # every episode grounds in a terminal reach (Q=success, no bootstrap)
+                # or a truncation — preventing the multi-goal bootstrap chains that let
+                # Q float up into the overestimation fixed point we saw collapse.
+                if reached or trunc:
                     break
 
             if episode >= warmup_episodes and self.memory.can_sample(batch_size):
