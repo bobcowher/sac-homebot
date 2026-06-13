@@ -13,7 +13,7 @@ recompute both the polar goal and the reward. Sampling is fully vectorised
 import numpy as np
 import torch
 from goal_geometry import (
-    GOAL_DIM, GOAL_RANGE_NORM, GOAL_RADIUS, SUCCESS_REWARD, SHAPING_SCALE,
+    GOAL_RANGE_NORM, GOAL_RADIUS, SUCCESS_REWARD, PROGRESS_SCALE,
 )
 
 
@@ -91,7 +91,7 @@ class GoalHERBuffer:
         dist_s = np.hypot(gx - rx, gy - ry)
         dist_ns = np.hypot(gx - nrx, gy - nry)
         success = dist_ns < GOAL_RADIUS
-        shaping = SHAPING_SCALE * (dist_s - gamma * dist_ns) / GOAL_RANGE_NORM
+        shaping = PROGRESS_SCALE * (dist_s - gamma * dist_ns)
         reward = (shaping + np.where(success, SUCCESS_REWARD, 0.0)).astype(np.float32)
         done = success.astype(np.float32)
 
