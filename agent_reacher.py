@@ -49,7 +49,12 @@ class ReacherAgent:
         self.actor_optim = Adam(self.actor.parameters(), lr=3e-5)
         self.critic_optim = Adam(self.critic.parameters(), lr=1e-4)
 
-        self.memory = GoalHERBuffer(max_buffer_size, self.input_shape, self.device, self.n_actions)
+        # her_prob=0: dense potential shaping already makes the reward dense, so HER
+        # is unnecessary — and HER future-relabeling on a wandering policy reinforces
+        # wandering (relabels bad trajectories into "reach this wandered-to point"),
+        # which fits the observed learn-then-collapse-as-own-data-accumulates pattern.
+        self.memory = GoalHERBuffer(max_buffer_size, self.input_shape, self.device,
+                                    self.n_actions, her_prob=0.0)
         self.goals = GoalManager(radius_px=start_radius)
         self.max_radius = max_radius
 
