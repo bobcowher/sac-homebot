@@ -23,7 +23,7 @@ from goal_buffer import GoalHERBuffer
 from goal_manager import GoalManager
 from goal_geometry import GOAL_DIM, GOAL_RADIUS, distance
 
-EMBED_DIM = 256
+EMBED_DIM = 1024
 
 
 def _hard_update(target, source):
