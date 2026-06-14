@@ -1,27 +1,30 @@
-"""Greedy evaluation of downloaded checkpoints.
+"""Greedy evaluation of bearing-reacher checkpoints.
 
-Runs N fully-greedy episodes (epsilon=0) per checkpoint and reports success
-percentage. Env config matches train.py exactly so the numbers are comparable
-to the training chart minus the epsilon-0.1 exploration noise.
+Runs N budget-limited, random-spawn greedy episodes (epsilon=0) per checkpoint
+and reports the reach rate. The budget per episode is computed from the initial
+distance so a circling policy cannot game the metric.
 
 Usage:
-    python3 evaluate.py                  # 100 episodes, q_model.pt + best.pt
+    python3 evaluate.py                     # 100 episodes, q_model.pt + best.pt
     python3 evaluate.py --episodes 20
-    python3 evaluate.py --checkpoints checkpoints/q_model.pt
+    python3 evaluate.py --checkpoints checkpoints/q_model_best.pt
 """
 
 import argparse
+import math
 import random
 
 import cv2
 import gymnasium as gym
+import numpy as np
 import torch
 
 import homebot  # noqa: F401  (side-effect env registration)
+from goal_geometry import bearing as compute_bearing, distance, eval_step_budget, GOAL_RADIUS
 from models.q_model import QModel
 
 
-def make_env():
+def make_env(max_steps=500):
     # Local homebot registers -V1 (capital), remote registers -v1.
     for env_id in ("HomeBot2D-Goal-v1", "HomeBot2D-Goal-V1"):
         try:
@@ -31,7 +34,7 @@ def make_env():
                 action_mode="discrete",
                 obs_resolution=(96, 96),
                 n_trash=2,
-                max_steps=1000,
+                max_steps=max_steps,
                 map_name="default",
                 goals=["collect_trash"],
             )
@@ -45,9 +48,11 @@ def make_env():
 def load_q_model(path, n_actions, device):
     state = torch.load(path, map_location=device)
     if "q_model" in state:  # best.pt wraps the state_dict with metadata
-        print(f"  ({path} is a best-checkpoint from episode {state.get('episode')})")
+        ep = state.get("episode", "?")
+        rr = state.get("reach_rate", float("nan"))
+        print(f"  ({path} is best-checkpoint from episode {ep}, reach_rate={rr:.3f})")
         state = state["q_model"]
-    model = QModel(action_dim=n_actions).to(device)
+    model = QModel(action_dim=n_actions, goal_scale=(1.0, 1.0)).to(device)
     model.load_state_dict(state)
     model.eval()
     return model
@@ -58,47 +63,67 @@ def process_observation(obs):
     return torch.from_numpy(obs).permute(2, 0, 1)
 
 
-def evaluate(model, env, episodes, device, epsilon=0.0):
+def random_spawn(env):
+    """Teleport robot to random valid tile/heading, return fresh full obs dict."""
+    base = env.unwrapped
+    tiles = base._map.valid_floor_tiles()
+    tx, ty = random.choice(tiles)
+    px, py = base._map.tile_to_pixel(tx, ty)
+    base._robot.x = px
+    base._robot.y = py
+    base._robot.angle = random.uniform(-math.pi, math.pi)
+    return base._build_obs()
+
+
+def evaluate(model, env, episodes, device):
+    """Budget-limited greedy eval with random spawn. Returns reach rate [0, 1]."""
     successes = 0
-    success_steps = []
+    budgets_used = []
 
     for episode in range(episodes):
-        raw_obs, _ = env.reset()
-        obs = process_observation(raw_obs["observation"])
-        desired_goal = raw_obs["desired_goal"]
-        pos = raw_obs["achieved_goal"]
+        env.reset()
+        fresh        = random_spawn(env)
+        obs          = process_observation(fresh["observation"])
+        desired_goal = fresh["desired_goal"]
+        base         = env.unwrapped
+        r            = base._robot
 
-        done = False
-        steps = 0
-        episode_reward = 0.0
+        init_dist = distance(r.x, r.y, desired_goal[0], desired_goal[1])
+        budget    = eval_step_budget(init_dist)
 
-        while not done:
-            if epsilon > 0 and random.random() < epsilon:
-                action = env.action_space.sample()
-            else:
-                with torch.no_grad():
-                    obs_t = obs.unsqueeze(0).float().to(device) / 255.0
-                    # Relative goal changes every step as the robot moves.
-                    goal_t = torch.as_tensor(
-                        desired_goal - pos, dtype=torch.float32, device=device
-                    ).unsqueeze(0)
-                    action = model(obs_t, goal_t).argmax(dim=1).item()
-            raw_next, reward, term, trunc, _ = env.step(action)
+        reached = False
+        steps_used = 0
+        for _ in range(budget):
+            goal_bearing = compute_bearing(r.x, r.y, r.angle,
+                                           desired_goal[0], desired_goal[1])
+            with torch.no_grad():
+                obs_t  = obs.unsqueeze(0).float().to(device) / 255.0
+                goal_t = torch.as_tensor(goal_bearing, dtype=torch.float32,
+                                         device=device).unsqueeze(0)
+                action = model(obs_t, goal_t).argmax(dim=1).item()
+
+            raw_next, _, term, trunc, _ = env.step(action)
             obs = process_observation(raw_next["observation"])
-            pos = raw_next["achieved_goal"]
-            done = term or trunc
-            episode_reward += float(reward)
-            steps += 1
+            steps_used += 1
 
-        if episode_reward > 0.5:
+            if distance(r.x, r.y, desired_goal[0], desired_goal[1]) < GOAL_RADIUS:
+                reached = True
+                break
+            if term or trunc:
+                break
+
+        if reached:
             successes += 1
-            success_steps.append(steps)
-        print(f"Episode {episode} | reward: {episode_reward:.1f} | steps: {steps}")
+            budgets_used.append(steps_used)
 
-    pct = 100.0 * successes / episodes
-    avg_steps = sum(success_steps) / len(success_steps) if success_steps else float("nan")
-    print(f"\nSuccess: {successes}/{episodes} = {pct:.0f}% | avg steps on success: {avg_steps:.0f}")
-    return pct
+        print(f"Episode {episode} | reached={reached} | steps={steps_used}/{budget} "
+              f"| init_dist={init_dist:.0f}")
+
+    rate = successes / episodes
+    avg_steps = sum(budgets_used) / len(budgets_used) if budgets_used else float("nan")
+    print(f"\nReach rate: {successes}/{episodes} = {rate:.3f} "
+          f"| avg steps on success: {avg_steps:.0f}")
+    return rate
 
 
 def main():
@@ -106,11 +131,7 @@ def main():
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument(
         "--checkpoints", nargs="+",
-        default=["checkpoints/q_model.pt"],
-    )
-    parser.add_argument(
-        "--epsilon", type=float, default=0.0,
-        help="random-action rate; 0.1 reproduces training conditions",
+        default=["checkpoints/q_model.pt", "checkpoints/q_model_best.pt"],
     )
     args = parser.parse_args()
 
@@ -120,13 +141,17 @@ def main():
 
     results = {}
     for path in args.checkpoints:
-        print(f"\n=== {path} | {args.episodes} episodes | epsilon={args.epsilon} ===")
+        import os
+        if not os.path.exists(path):
+            print(f"\n=== Skipping {path} (not found) ===")
+            continue
+        print(f"\n=== {path} | {args.episodes} episodes ===")
         model = load_q_model(path, n_actions, device)
-        results[path] = evaluate(model, env, args.episodes, device, args.epsilon)
+        results[path] = evaluate(model, env, args.episodes, device)
 
     print("\n=== Summary ===")
-    for path, pct in results.items():
-        print(f"{path}: {pct:.0f}%")
+    for path, rate in results.items():
+        print(f"{path}: {rate:.3f} ({rate * 100:.0f}%)")
 
 
 if __name__ == "__main__":
